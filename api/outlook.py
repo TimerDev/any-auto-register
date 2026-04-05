@@ -1,11 +1,11 @@
 from datetime import datetime, timezone
-from typing import List, Dict, Any
+from typing import Any, Dict, List
 
 from fastapi import APIRouter
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
-from core.db import engine, OutlookAccountModel
+from core.db import OutlookAccountModel, engine
 
 router = APIRouter(prefix="/outlook", tags=["outlook"])
 

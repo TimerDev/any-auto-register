@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { App, Card, Form, Input, Select, Button, message, Tabs, Space, Tag, Typography, Modal, QRCode, Switch, Alert } from 'antd'
+import type { FormInstance } from 'antd'
 import {
   SaveOutlined,
   EyeOutlined,
@@ -30,6 +31,7 @@ const SELECT_FIELDS: Record<string, { label: string; value: string }[]> = {
     { label: 'YYDS Mail / MaliAPI', value: 'maliapi' },
     { label: 'GPTMail', value: 'gptmail' },
     { label: 'OpenTrashMail', value: 'opentrashmail' },
+    { label: 'Cloudflare 邮件路由（直转邮箱）', value: 'cfrouting' },
     { label: 'Freemail（自建 CF Worker）', value: 'freemail' },
     { label: 'CF Worker（自建域名）', value: 'cfworker' },
   ],
@@ -91,6 +93,18 @@ const TAB_ITEMS = [
           { key: 'laoudo_email', label: '邮箱地址', placeholder: 'xxx@laoudo.com' },
           { key: 'laoudo_account_id', label: 'Account ID', placeholder: '563' },
           { key: 'laoudo_auth', label: 'JWT Token', placeholder: 'eyJ...', secret: true },
+        ],
+      },
+      {
+        title: 'Cloudflare 邮件路由（直转邮箱）',
+        desc: '不走 Worker。仅随机生成你的域名别名，并直接轮询目标收件箱 IMAP；前提是你已在 Cloudflare 把该域名配置为 catch-all 或对应转发规则。常见目标邮箱可直接填 QQ 或 Gmail。',
+        fields: [
+          { key: 'cfrouting_domain', label: '路由域名', placeholder: 'example.com,mail.example.com' },
+          { key: 'cfrouting_imap_server', label: 'IMAP Server', placeholder: 'imap.qq.com / imap.gmail.com / outlook.office365.com' },
+          { key: 'cfrouting_imap_port', label: 'IMAP Port', placeholder: '993' },
+          { key: 'cfrouting_username', label: '目标邮箱用户名', placeholder: 'your@qq.com / your@gmail.com' },
+          { key: 'cfrouting_password', label: '目标邮箱密码 / 授权码 / App Password', secret: true },
+          { key: 'cfrouting_mailboxes', label: '轮询文件夹', placeholder: 'INBOX（QQ / Gmail 都先从这里试）' },
         ],
       },
       {
@@ -401,6 +415,75 @@ interface AppleMailPoolSnapshot {
   truncated: boolean
 }
 
+interface IntegrationServiceItem {
+  name: string
+  label: string
+  running: boolean
+  repo_exists: boolean
+  pid?: number | string | null
+  repo_path: string
+  url?: string
+  management_url?: string
+  management_key?: string
+  log_path: string
+  last_error?: string | null
+}
+
+interface OutlookImportSuccessResult {
+  success: number
+  failed: number
+  errors?: string[]
+}
+
+interface OutlookImportErrorResult {
+  error: string
+}
+
+type OutlookImportResult = OutlookImportSuccessResult | OutlookImportErrorResult
+type SettingsFormValues = Record<string, unknown>
+
+interface IntegrationServicesResponse {
+  items?: IntegrationServiceItem[]
+}
+
+interface BackfillResponse {
+  total: number
+  success: number
+}
+
+interface SolverStatusResponse {
+  running: boolean
+}
+
+interface AuthStatusResponse {
+  has_password: boolean
+  has_totp: boolean
+}
+
+interface AuthSetupResponse {
+  access_token: string
+}
+
+interface TotpSetupResponse {
+  secret: string
+  uri: string
+}
+
+async function fetchJson<T>(path: string, opts?: RequestInit): Promise<T> {
+  return apiFetch(path, opts) as Promise<T>
+}
+
+async function fetchAppleMailPoolSnapshot(poolDir: string, poolFile: string): Promise<AppleMailPoolSnapshot> {
+  const params = new URLSearchParams()
+  if (poolDir) {
+    params.set('pool_dir', poolDir)
+  }
+  if (poolFile) {
+    params.set('pool_file', poolFile)
+  }
+  return fetchJson<AppleMailPoolSnapshot>(`/config/applemail/pool?${params.toString()}`)
+}
+
 function formatResultText(data: unknown) {
   if (typeof data === 'string') return data
   try {
@@ -435,7 +518,9 @@ function parseStoredDomainList(value: unknown): string[] {
     if (Array.isArray(parsed)) {
       return normalizeDomainList(parsed)
     }
-  } catch {}
+  } catch {
+    void 0
+  }
 
   return normalizeDomainList(
     text
@@ -496,6 +581,19 @@ function formatDisplayPercent(value: number | null): string {
   return `${value.toFixed(2)}%`
 }
 
+function getErrorMessage(error: unknown, fallback: string): string {
+  const record = asRecord(error)
+  const message = pickString(record, ['message', 'detail', 'error'])
+  if (message) return message
+  if (error instanceof Error && error.message) return error.message
+  if (typeof error === 'string' && error.trim()) return error
+  return fallback
+}
+
+function isOutlookImportSuccessResult(result: OutlookImportResult): result is OutlookImportSuccessResult {
+  return 'success' in result
+}
+
 function ConfigField({ field }: { field: FieldConfig }) {
   const [showSecret, setShowSecret] = useState(false)
   const options = SELECT_FIELDS[field.key]
@@ -542,7 +640,7 @@ function ConfigSection({ section }: { section: SectionConfig }) {
   )
 }
 
-function CFWorkerDomainPoolSection({ form }: { form: any }) {
+function CFWorkerDomainPoolSection({ form }: { form: FormInstance<SettingsFormValues> }) {
   const watchedDomains = Form.useWatch('cfworker_domains', form) || []
   const watchedEnabledDomains = Form.useWatch('cfworker_enabled_domains', form) || []
   const normalizedDomains = normalizeDomainList(watchedDomains)
@@ -669,7 +767,7 @@ function CFWorkerDomainPoolSection({ form }: { form: any }) {
   )
 }
 
-function AppleMailPoolImportSection({ form }: { form: any }) {
+function AppleMailPoolImportSection({ form }: { form: FormInstance<SettingsFormValues> }) {
   const [content, setContent] = useState('')
   const [filename, setFilename] = useState('')
   const [importing, setImporting] = useState(false)
@@ -678,17 +776,10 @@ function AppleMailPoolImportSection({ form }: { form: any }) {
   const watchedPoolDir = Form.useWatch('applemail_pool_dir', form) || 'mail'
   const watchedPoolFile = Form.useWatch('applemail_pool_file', form) || ''
 
-  const loadSnapshot = async () => {
+  const loadSnapshot = async (poolDir = String(watchedPoolDir || '').trim() || 'mail', poolFile = String(watchedPoolFile || '').trim()) => {
     setLoadingSnapshot(true)
     try {
-      const params = new URLSearchParams()
-      if (String(watchedPoolDir || '').trim()) {
-        params.set('pool_dir', String(watchedPoolDir || '').trim())
-      }
-      if (String(watchedPoolFile || '').trim()) {
-        params.set('pool_file', String(watchedPoolFile || '').trim())
-      }
-      const result = await apiFetch(`/config/applemail/pool?${params.toString()}`)
+      const result = await fetchAppleMailPoolSnapshot(poolDir, poolFile)
       setSnapshot(result)
     } catch {
       setSnapshot(null)
@@ -698,7 +789,31 @@ function AppleMailPoolImportSection({ form }: { form: any }) {
   }
 
   useEffect(() => {
-    void loadSnapshot()
+    const poolDir = String(watchedPoolDir || '').trim() || 'mail'
+    const poolFile = String(watchedPoolFile || '').trim()
+    let cancelled = false
+
+    setLoadingSnapshot(true)
+    void fetchAppleMailPoolSnapshot(poolDir, poolFile)
+      .then((result) => {
+        if (!cancelled) {
+          setSnapshot(result)
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setSnapshot(null)
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLoadingSnapshot(false)
+        }
+      })
+
+    return () => {
+      cancelled = true
+    }
   }, [watchedPoolDir, watchedPoolFile])
 
   const handleImport = async () => {
@@ -710,7 +825,7 @@ function AppleMailPoolImportSection({ form }: { form: any }) {
     setImporting(true)
     try {
       const poolDir = String(form.getFieldValue('applemail_pool_dir') || 'mail').trim() || 'mail'
-      const result = await apiFetch('/config/applemail/import', {
+      const result = await fetchJson<AppleMailPoolSnapshot>('/config/applemail/import', {
         method: 'POST',
         body: JSON.stringify({
           content,
@@ -827,7 +942,7 @@ function SolverStatus() {
 
   const checkSolver = async () => {
     try {
-      const d = await apiFetch('/solver/status')
+      const d = await fetchJson<SolverStatusResponse>('/solver/status')
       setRunning(d.running)
     } catch {
       setRunning(false)
@@ -841,9 +956,14 @@ function SolverStatus() {
   }
 
   useEffect(() => {
-    checkSolver()
+    const kickoff = window.setTimeout(() => {
+      void checkSolver()
+    }, 0)
     const timer = window.setInterval(checkSolver, 5000)
-    return () => window.clearInterval(timer)
+    return () => {
+      window.clearTimeout(kickoff)
+      window.clearInterval(timer)
+    }
   }, [])
 
   return (
@@ -878,7 +998,7 @@ function SolverStatus() {
 }
 
 function IntegrationsPanel() {
-  const [items, setItems] = useState<any[]>([])
+  const [items, setItems] = useState<IntegrationServiceItem[]>([])
   const [loading, setLoading] = useState(false)
   const [busy, setBusy] = useState('')
   const [resultModal, setResultModal] = useState({
@@ -900,7 +1020,7 @@ function IntegrationsPanel() {
   const load = async () => {
     setLoading(true)
     try {
-      const d = await apiFetch('/integrations/services')
+      const d = await fetchJson<IntegrationServicesResponse>('/integrations/services')
       setItems(d.items || [])
     } finally {
       setLoading(false)
@@ -913,16 +1033,17 @@ function IntegrationsPanel() {
     return () => window.clearInterval(timer)
   }, [])
 
-  const doAction = async (key: string, request: Promise<any>) => {
+  const doAction = async (key: string, request: Promise<unknown>) => {
     setBusy(key)
     try {
       const result = await request
       await load()
       message.success('操作完成')
       showResultModal('操作结果', result, true)
-    } catch (e: any) {
-      message.error(e?.message || '操作失败')
-      showResultModal('操作结果', e?.message || e || '操作失败', false)
+    } catch (error: unknown) {
+      const errorMessage = getErrorMessage(error, '操作失败')
+      message.error(errorMessage)
+      showResultModal('操作结果', errorMessage, false)
       await load()
     } finally {
       setBusy('')
@@ -932,15 +1053,16 @@ function IntegrationsPanel() {
   const backfill = async (platforms: string[], label: string, busyKey: string) => {
     setBusy(busyKey)
     try {
-      const d = await apiFetch('/integrations/backfill', {
+      const d = await fetchJson<BackfillResponse>('/integrations/backfill', {
         method: 'POST',
         body: JSON.stringify({ platforms }),
       })
       message.success(`${label} 回填完成：成功 ${d.success} / ${d.total}`)
       showResultModal(`${label} 回填结果`, d, true)
-    } catch (e: any) {
-      message.error(e?.message || `${label} 回填失败`)
-      showResultModal(`${label} 回填结果`, e?.message || e || `${label} 回填失败`, false)
+    } catch (error: unknown) {
+      const errorMessage = getErrorMessage(error, `${label} 回填失败`)
+      message.error(errorMessage)
+      showResultModal(`${label} 回填结果`, errorMessage, false)
     } finally {
       setBusy('')
     }
@@ -1067,7 +1189,7 @@ function ContributionPanel({
   saving,
   saved,
 }: {
-  form: any
+  form: FormInstance<SettingsFormValues>
   onSave: () => Promise<void>
   saving: boolean
   saved: boolean
@@ -1138,8 +1260,8 @@ function ContributionPanel({
       if (!silent) {
         message.success('额度信息已刷新')
       }
-    } catch (e: any) {
-      const detail = String(e?.message || '获取额度信息失败')
+    } catch (error: unknown) {
+      const detail = getErrorMessage(error, '获取额度信息失败')
       setStatsError(detail)
       if (!silent) {
         message.error(detail)
@@ -1187,8 +1309,8 @@ function ContributionPanel({
         message.success('提现成功')
       }
       await fetchStats(true)
-    } catch (e: any) {
-      const detail = String(e?.message || '提现失败')
+    } catch (error: unknown) {
+      const detail = getErrorMessage(error, '提现失败')
       setRedeemResponse({ ok: false, error: detail })
       message.error(detail)
     } finally {
@@ -1219,8 +1341,8 @@ function ContributionPanel({
       if (contributionEnabled) {
         await fetchStats(true, generated)
       }
-    } catch (e: any) {
-      message.error(String(e?.message || '请求新建 key 失败'))
+    } catch (error: unknown) {
+      message.error(getErrorMessage(error, '请求新建 key 失败'))
     } finally {
       setCreatingKey(false)
     }
@@ -1352,7 +1474,7 @@ function OutlookImportSection() {
   const { message: msg } = App.useApp()
   const [value, setValue] = useState('')
   const [loading, setLoading] = useState(false)
-  const [result, setResult] = useState<any | null>(null)
+  const [result, setResult] = useState<OutlookImportResult | null>(null)
 
   const handleSubmit = async () => {
     const payload = String(value || '').trim()
@@ -1362,15 +1484,16 @@ function OutlookImportSection() {
     }
     setLoading(true)
     try {
-      const res = await apiFetch('/outlook/batch-import', {
+      const res = await fetchJson<OutlookImportSuccessResult>('/outlook/batch-import', {
         method: 'POST',
         body: JSON.stringify({ data: payload, enabled: true }),
       })
       setResult(res)
       msg.success(`导入完成：成功 ${res.success} / 失败 ${res.failed}`)
-    } catch (e: any) {
-      msg.error(e?.message || '导入失败')
-      setResult({ error: e?.message || String(e) })
+    } catch (error: unknown) {
+      const errorMessage = getErrorMessage(error, '导入失败')
+      msg.error(errorMessage)
+      setResult({ error: errorMessage })
     } finally {
       setLoading(false)
     }
@@ -1398,7 +1521,7 @@ function OutlookImportSection() {
       </Space>
       {result ? (
         <div style={{ marginTop: 12 }}>
-          {'success' in result ? (
+          {isOutlookImportSuccessResult(result) ? (
             <Alert
               type={result.failed ? 'warning' : 'success'}
               showIcon
@@ -1420,7 +1543,7 @@ type TotpSetupState = 'idle' | 'setup'
 
 function SecurityPanel() {
   const { message: msg } = App.useApp()
-  const [status, setStatus] = useState<{ has_password: boolean; has_totp: boolean } | null>(null)
+  const [status, setStatus] = useState<AuthStatusResponse | null>(null)
   const [loading, setLoading] = useState(false)
 
   const [enableForm] = Form.useForm()
@@ -1433,9 +1556,11 @@ function SecurityPanel() {
 
   const loadStatus = async () => {
     try {
-      const s = await apiFetch('/auth/status')
+      const s = await fetchJson<AuthStatusResponse>('/auth/status')
       setStatus(s)
-    } catch {}
+    } catch {
+      setStatus(null)
+    }
   }
 
   useEffect(() => { loadStatus() }, [])
@@ -1447,7 +1572,7 @@ function SecurityPanel() {
     }
     setLoading(true)
     try {
-      const d = await apiFetch('/auth/setup', {
+      const d = await fetchJson<AuthSetupResponse>('/auth/setup', {
         method: 'POST',
         body: JSON.stringify({ password: values.password }),
       })
@@ -1455,8 +1580,8 @@ function SecurityPanel() {
       msg.success('密码保护已启用')
       enableForm.resetFields()
       await loadStatus()
-    } catch (e: any) {
-      msg.error(e.message)
+    } catch (error: unknown) {
+      msg.error(getErrorMessage(error, '启用密码保护失败'))
     } finally {
       setLoading(false)
     }
@@ -1469,8 +1594,8 @@ function SecurityPanel() {
       localStorage.removeItem('auth_token')
       msg.success('密码保护已关闭')
       await loadStatus()
-    } catch (e: any) {
-      msg.error(e.message)
+    } catch (error: unknown) {
+      msg.error(getErrorMessage(error, '关闭密码保护失败'))
     } finally {
       setLoading(false)
     }
@@ -1489,8 +1614,8 @@ function SecurityPanel() {
       })
       msg.success('密码已更新')
       pwForm.resetFields()
-    } catch (e: any) {
-      msg.error(e.message)
+    } catch (error: unknown) {
+      msg.error(getErrorMessage(error, '修改密码失败'))
     } finally {
       setLoading(false)
     }
@@ -1499,12 +1624,12 @@ function SecurityPanel() {
   const handleSetupTotp = async () => {
     setLoading(true)
     try {
-      const d = await apiFetch('/auth/2fa/setup')
+      const d = await fetchJson<TotpSetupResponse>('/auth/2fa/setup')
       setTotpSecret(d.secret)
       setTotpUri(d.uri)
       setTotpSetupState('setup')
-    } catch (e: any) {
-      msg.error(e.message)
+    } catch (error: unknown) {
+      msg.error(getErrorMessage(error, '获取双因素认证信息失败'))
     } finally {
       setLoading(false)
     }
@@ -1521,8 +1646,8 @@ function SecurityPanel() {
       setTotpSetupState('idle')
       codeForm.resetFields()
       await loadStatus()
-    } catch (e: any) {
-      msg.error(e.message)
+    } catch (error: unknown) {
+      msg.error(getErrorMessage(error, '启用双因素认证失败'))
     } finally {
       setLoading(false)
     }
@@ -1534,8 +1659,8 @@ function SecurityPanel() {
       await apiFetch('/auth/2fa/disable', { method: 'POST' })
       msg.success('双因素认证已关闭')
       await loadStatus()
-    } catch (e: any) {
-      msg.error(e.message)
+    } catch (error: unknown) {
+      msg.error(getErrorMessage(error, '关闭双因素认证失败'))
     } finally {
       setLoading(false)
     }
@@ -1661,7 +1786,7 @@ function SecurityPanel() {
 }
 
 export default function Settings() {
-  const [form] = Form.useForm()
+  const [form] = Form.useForm<SettingsFormValues>()
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
   const [activeTab, setActiveTab] = useState('register')
@@ -1679,6 +1804,12 @@ export default function Settings() {
       }
       if (!data.applemail_mailboxes) {
         data.applemail_mailboxes = 'INBOX,Junk'
+      }
+      if (!data.cfrouting_imap_port) {
+        data.cfrouting_imap_port = '993'
+      }
+      if (!data.cfrouting_mailboxes) {
+        data.cfrouting_mailboxes = 'INBOX'
       }
       if (!data.gptmail_base_url) {
         data.gptmail_base_url = 'https://mail.chatgpt.org.uk'

@@ -28,12 +28,25 @@ import { apiFetch } from '@/lib/utils'
 
 const { Text } = Typography
 
+interface RegisterTaskSnapshot {
+  id?: string
+  task_id?: string
+  status?: string
+  progress?: string
+  skipped?: number
+  success?: number
+  errors?: string[]
+  error?: string
+  cashier_urls?: string[]
+}
+
 export default function RegisterTaskPage() {
   const [form] = Form.useForm()
-  const [task, setTask] = useState<any>(null)
+  const [task, setTask] = useState<RegisterTaskSnapshot | null>(null)
   const [polling, setPolling] = useState(false)
   const { mode: chatgptRegistrationMode, setMode: setChatgptRegistrationMode } =
     usePersistentChatGPTRegistrationMode()
+  const taskErrors = task?.errors ?? []
 
   useEffect(() => {
     apiFetch('/config').then((cfg) => {
@@ -67,6 +80,12 @@ export default function RegisterTaskPage() {
         opentrashmail_api_url: cfg.opentrashmail_api_url || '',
         opentrashmail_domain: cfg.opentrashmail_domain || '',
         opentrashmail_password: cfg.opentrashmail_password || '',
+        cfrouting_domain: cfg.cfrouting_domain || '',
+        cfrouting_imap_server: cfg.cfrouting_imap_server || '',
+        cfrouting_imap_port: Number(cfg.cfrouting_imap_port || 993),
+        cfrouting_username: cfg.cfrouting_username || '',
+        cfrouting_password: cfg.cfrouting_password || '',
+        cfrouting_mailboxes: cfg.cfrouting_mailboxes || 'INBOX',
         maliapi_base_url: cfg.maliapi_base_url || 'https://maliapi.215.im/v1',
         maliapi_api_key: cfg.maliapi_api_key || '',
         maliapi_domain: cfg.maliapi_domain || '',
@@ -118,6 +137,12 @@ export default function RegisterTaskPage() {
       opentrashmail_api_url: values.opentrashmail_api_url,
       opentrashmail_domain: values.opentrashmail_domain,
       opentrashmail_password: values.opentrashmail_password,
+      cfrouting_domain: values.cfrouting_domain,
+      cfrouting_imap_server: values.cfrouting_imap_server,
+      cfrouting_imap_port: values.cfrouting_imap_port,
+      cfrouting_username: values.cfrouting_username,
+      cfrouting_password: values.cfrouting_password,
+      cfrouting_mailboxes: values.cfrouting_mailboxes,
       maliapi_base_url: values.maliapi_base_url,
       maliapi_api_key: values.maliapi_api_key,
       maliapi_domain: values.maliapi_domain,
@@ -233,6 +258,8 @@ export default function RegisterTaskPage() {
         applemail_base_url: 'https://www.appleemail.top',
         applemail_pool_dir: 'mail',
         applemail_mailboxes: 'INBOX,Junk',
+        cfrouting_imap_port: 993,
+        cfrouting_mailboxes: 'INBOX',
         gptmail_base_url: 'https://mail.chatgpt.org.uk',
         cloudmail_timeout: 30,
         count: 1,
@@ -307,6 +334,7 @@ export default function RegisterTaskPage() {
                 { value: 'maliapi', label: 'YYDS Mail / MaliAPI' },
                 { value: 'gptmail', label: 'GPTMail' },
                 { value: 'opentrashmail', label: 'OpenTrashMail' },
+                { value: 'cfrouting', label: 'Cloudflare 邮件路由（直转邮箱）' },
                 { value: 'duckmail', label: 'DuckMail' },
                 { value: 'freemail', label: 'Freemail' },
                 { value: 'laoudo', label: 'Laoudo' },
@@ -443,6 +471,52 @@ export default function RegisterTaskPage() {
                 extra="当 OpenTrashMail 开启 PASSWORD 保护时填写，会自动追加到 JSON API 查询参数"
               >
                 <Input.Password placeholder="留空表示未启用" />
+              </Form.Item>
+            </>
+          )}
+          {mailProvider === 'cfrouting' && (
+            <>
+              <Form.Item
+                name="cfrouting_domain"
+                label="路由域名"
+                rules={[{ required: true, message: '请输入已在 Cloudflare 开启邮件路由的域名' }]}
+                extra="支持单个域名，或逗号分隔多个已配置 catch-all / 转发规则的域名。"
+              >
+                <Input placeholder="example.com,mail.example.com" />
+              </Form.Item>
+              <Form.Item
+                name="cfrouting_imap_server"
+                label="目标邮箱 IMAP Server"
+                rules={[{ required: true, message: '请输入转发目标邮箱的 IMAP Server' }]}
+                extra="常见值：QQ 填 imap.qq.com，Gmail 填 imap.gmail.com。"
+              >
+                <Input placeholder="imap.qq.com / imap.gmail.com / outlook.office365.com" />
+              </Form.Item>
+              <Form.Item name="cfrouting_imap_port" label="IMAP Port">
+                <InputNumber min={1} max={65535} style={{ width: '100%' }} placeholder="993" />
+              </Form.Item>
+              <Form.Item
+                name="cfrouting_username"
+                label="目标邮箱用户名"
+                rules={[{ required: true, message: '请输入目标邮箱用户名' }]}
+                extra="填写完整邮箱地址，例如 your@qq.com 或 your@gmail.com。"
+              >
+                <Input placeholder="your@qq.com / your@gmail.com" />
+              </Form.Item>
+              <Form.Item
+                name="cfrouting_password"
+                label="目标邮箱密码 / 授权码 / App Password"
+                rules={[{ required: true, message: '请输入目标邮箱密码或应用专用密码' }]}
+                extra="QQ 通常填邮箱授权码；个人 Gmail 通常填 App Password。"
+              >
+                <Input.Password placeholder="QQ 授权码 / Gmail App Password" />
+              </Form.Item>
+              <Form.Item
+                name="cfrouting_mailboxes"
+                label="轮询文件夹"
+                extra="默认只查 INBOX。QQ 和 Gmail 都建议先从 INBOX 开始；若实际落在别处，再填对应 IMAP 文件夹名。"
+              >
+                <Input placeholder="INBOX" />
               </Form.Item>
             </>
           )}
@@ -594,9 +668,9 @@ export default function RegisterTaskPage() {
               <CheckCircleOutlined /> 成功 {task.success} 个
             </div>
           )}
-          {task.errors?.length > 0 && (
+          {taskErrors.length > 0 && (
             <div style={{ marginTop: 8 }}>
-              {task.errors.map((e: string, i: number) => (
+              {taskErrors.map((e: string, i: number) => (
                 <div key={i} style={{ color: '#ef4444', marginBottom: 4 }}>
                   <CloseCircleOutlined /> {e}
                 </div>
