@@ -24,13 +24,16 @@ accounts.txt
 account.txt
 
 # 前端
+.pnpm-store/
 frontend/node_modules/
 frontend/dist/
+frontend/.pnpm-store/
 
 # Electron
 electron/node_modules/
 electron/dist/
 electron/backend/
+electron/.pnpm-store/
 
 # PyInstaller
 backend.spec

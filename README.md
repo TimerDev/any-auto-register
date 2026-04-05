@@ -93,7 +93,7 @@
 ## 环境要求
 
 - Python 3.12+
-- Node.js 18+
+- Node.js 18+ / pnpm 10+
 - uv（推荐）或 Conda（兼容旧流程）
 - Windows（推荐直接使用仓库内启动脚本）
 
@@ -186,9 +186,15 @@ uv run python -m camoufox fetch
 
 ### 3. 安装并构建前端
 
+如本机还没有 `pnpm`，可先执行：
+
 ```bash
-npm --prefix frontend install
-npm --prefix frontend run build
+corepack enable
+```
+
+```bash
+pnpm --dir frontend install --frozen-lockfile
+pnpm --dir frontend build
 ```
 
 构建完成后，静态资源输出到：
@@ -227,7 +233,7 @@ uv run python main.py
 http://localhost:8000
 ```
 
-> 如果你已经执行过 `npm run build`，前端会由 FastAPI 直接托管，因此访问的是 `8000`，不是 `5173`。
+> 如果你已经执行过 `pnpm --dir frontend build`，前端会由 FastAPI 直接托管，因此访问的是 `8000`，不是 `5173`。
 
 ## Windows 启动脚本说明
 
@@ -276,8 +282,7 @@ stop_backend.bat
 ### 终端 2：启动 Vite
 
 ```bash
-cd frontend
-npm run dev
+pnpm --dir frontend dev
 ```
 
 访问地址：
