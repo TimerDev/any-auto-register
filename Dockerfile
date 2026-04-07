@@ -2,14 +2,11 @@
 
 FROM node:20-bookworm-slim AS frontend-builder
 
-WORKDIR /app/frontend
+WORKDIR /app
 
-COPY frontend/package.json frontend/pnpm-lock.yaml ./
-RUN corepack enable && pnpm install --frozen-lockfile
-
-COPY frontend/ ./
-RUN pnpm build
-
+COPY frontend ./frontend
+RUN corepack enable && pnpm --dir frontend install --frozen-lockfile
+RUN pnpm --dir frontend build
 
 FROM python:3.12-slim AS runtime
 
