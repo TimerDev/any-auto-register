@@ -192,11 +192,6 @@ class ChatGPTPlatform(BasePlatform):
             max_retries=max_retries,
             extra_config=extra_config,
         )
-        result = adapter.run(context)
-        if not result or not result.success:
-            raise RuntimeError(result.error_message if result else "注册失败")
-
-        return adapter.build_account(result, password)
 
     def get_platform_actions(self) -> list:
         return [

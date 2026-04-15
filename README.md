@@ -106,9 +106,28 @@
 - 注册任务页
 - ChatGPT 平台注册弹窗
 
+### 2. ChatGPT 账号类型选择
+
+支持选择注册不同的ChatGPT账号类型：
+
+- **Codex CLI 模式**（默认）
+  - 使用 `app_EMoamEEZ73f0CkXaXp7hrann` client_id
+  - 注册 OpenAI Codex CLI 专用账号
+  - 可能需要手机号验证
+- **ChatGPT Web 模式**
+  - 使用 `pdlLIX2Y72MIl2rhLhTE9VV9bN905kBh` client_id
+  - 注册普通 ChatGPT Web 账号
+  - 无需手机号验证
+
+通过配置 `chatgpt_use_codex` 选项控制：
+- `true` 或 `"codex"`：使用Codex模式（默认）
+- `false` 或 `"chatgpt"`：使用ChatGPT Web模式
+
+这项切换同样在注册任务页和ChatGPT平台注册弹窗中可见。
 
 
-### 4. ChatGPT 批量状态同步与补传
+
+### 3. ChatGPT 批量状态同步与补传
 
 在 ChatGPT 平台列表顶部，当前还有两类批量能力：
 

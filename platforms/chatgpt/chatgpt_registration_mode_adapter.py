@@ -12,6 +12,10 @@ CHATGPT_REGISTRATION_MODE_REFRESH_TOKEN = "refresh_token"
 CHATGPT_REGISTRATION_MODE_ACCESS_TOKEN_ONLY = "access_token_only"
 DEFAULT_CHATGPT_REGISTRATION_MODE = CHATGPT_REGISTRATION_MODE_REFRESH_TOKEN
 
+# OAuth Client IDs
+CHATGPT_CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"  # Codex CLI
+CHATGPT_WEB_CLIENT_ID = "pdlLIX2Y72MIl2rhLhTE9VV9bN905kBh"  # ChatGPT Web (可能需要更新)
+
 
 def normalize_chatgpt_registration_mode(value) -> str:
     normalized = str(value or "").strip().lower().replace("-", "_")
@@ -51,6 +55,20 @@ def resolve_chatgpt_registration_mode(extra: Optional[dict]) -> str:
     return DEFAULT_CHATGPT_REGISTRATION_MODE
 
 
+def resolve_chatgpt_client_id(extra: Optional[dict]) -> str:
+    """解析ChatGPT注册时使用的OAuth client_id"""
+    extra = extra or {}
+    use_codex = extra.get("chatgpt_use_codex", True)  # 默认使用Codex模式保持兼容性
+
+    # 标准化布尔值解析
+    if isinstance(use_codex, str):
+        use_codex = use_codex.lower() in ("true", "1", "yes", "on", "codex")
+    elif isinstance(use_codex, int):
+        use_codex = bool(use_codex)
+
+    return CHATGPT_CODEX_CLIENT_ID if use_codex else CHATGPT_WEB_CLIENT_ID
+
+
 @dataclass(frozen=True)
 class ChatGPTRegistrationContext:
     email_service: object
@@ -71,11 +89,26 @@ class BaseChatGPTRegistrationModeAdapter(ABC):
         """按模式构造底层注册引擎。"""
 
     def run(self, context: ChatGPTRegistrationContext):
-        engine = self._create_engine(context)
-        if context.email is not None:
-            engine.email = context.email
-        if context.password is not None:
-            engine.password = context.password
+        # 在运行前处理配置，确保包含正确的client_id
+        processed_config = dict(context.extra_config)
+        processed_config["oauth_client_id"] = resolve_chatgpt_client_id(context.extra_config)
+
+        processed_context = ChatGPTRegistrationContext(
+            email_service=context.email_service,
+            proxy_url=context.proxy_url,
+            callback_logger=context.callback_logger,
+            email=context.email,
+            password=context.password,
+            browser_mode=context.browser_mode,
+            max_retries=context.max_retries,
+            extra_config=processed_config,
+        )
+
+        engine = self._create_engine(processed_context)
+        if processed_context.email is not None:
+            engine.email = processed_context.email
+        if processed_context.password is not None:
+            engine.password = processed_context.password
         return engine.run()
 
     def build_account(self, result, fallback_password: str) -> Account:
