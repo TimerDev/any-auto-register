@@ -193,6 +193,15 @@ class ChatGPTPlatform(BasePlatform):
             extra_config=extra_config,
         )
 
+        result = adapter.run(context)
+        if result is None:
+            raise RuntimeError("注册失败：适配器返回空结果")
+        if not getattr(result, "success", False):
+            error_msg = getattr(result, "error_message", "未知错误")
+            raise RuntimeError(f"注册失败：{error_msg}")
+
+        return adapter.build_account(result, password)
+
     def get_platform_actions(self) -> list:
         return [
             {"id": "probe_local_status", "label": "探测本地状态", "params": []},

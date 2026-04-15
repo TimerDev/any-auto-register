@@ -128,12 +128,14 @@ class BaseChatGPTRegistrationModeAdapter(ABC):
         return result
 
     def build_account(self, result, fallback_password: str) -> Account:
+        if result is None:
+            raise RuntimeError("build_account received None result")
         return Account(
             platform="chatgpt",
-            email=getattr(result, "email", ""),
-            password=getattr(result, "password", "") or fallback_password,
-            user_id=getattr(result, "account_id", ""),
-            token=getattr(result, "access_token", ""),
+            email=str(getattr(result, "email", "") or ""),
+            password=str(getattr(result, "password", "") or fallback_password),
+            user_id=str(getattr(result, "account_id", "") or ""),
+            token=str(getattr(result, "access_token", "") or ""),
             status=AccountStatus.REGISTERED,
             extra=self._build_account_extra(result),
         )

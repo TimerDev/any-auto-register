@@ -19,8 +19,10 @@ import {
   LoadingOutlined,
 } from '@ant-design/icons'
 import { ChatGPTRegistrationModeSwitch } from '@/components/ChatGPTRegistrationModeSwitch'
+import { ChatGPTCodexModeSwitch } from '@/components/ChatGPTRegistrationModeSwitch'
 import { TaskLogPanel } from '@/components/TaskLogPanel'
 import { usePersistentChatGPTRegistrationMode } from '@/hooks/usePersistentChatGPTRegistrationMode'
+import { usePersistentChatGPTCodexMode } from '@/hooks/usePersistentChatGPTRegistrationMode'
 import { parseBooleanConfigValue } from '@/lib/configValueParsers'
 import { buildChatGPTRegistrationRequestAdapter } from '@/lib/chatgptRegistrationRequestAdapter'
 import { getExecutorOptions, normalizeExecutorForPlatform } from '@/lib/platformExecutorOptions'
@@ -51,6 +53,7 @@ export default function RegisterTaskPage() {
   const [polling, setPolling] = useState(false)
   const { mode: chatgptRegistrationMode, setMode: setChatgptRegistrationMode } =
     usePersistentChatGPTRegistrationMode()
+  const { useCodex, setUseCodex } = usePersistentChatGPTCodexMode()
   const taskErrors = task?.errors ?? []
 
   useEffect(() => {
@@ -204,6 +207,7 @@ export default function RegisterTaskPage() {
       buildChatGPTRegistrationRequestAdapter(
         values.platform,
         chatgptRegistrationMode,
+        useCodex,
       )
     const adaptedRegisterExtra = chatgptRegistrationRequestAdapter
       ? chatgptRegistrationRequestAdapter.extendExtra(registerExtra)
@@ -329,12 +333,20 @@ export default function RegisterTaskPage() {
             </Form.Item>
           </Space>
           {platform === 'chatgpt' && (
-            <Form.Item label="ChatGPT Token 方案">
-              <ChatGPTRegistrationModeSwitch
-                mode={chatgptRegistrationMode}
-                onChange={setChatgptRegistrationMode}
-              />
-            </Form.Item>
+            <>
+              <Form.Item label="ChatGPT Token 方案">
+                <ChatGPTRegistrationModeSwitch
+                  mode={chatgptRegistrationMode}
+                  onChange={setChatgptRegistrationMode}
+                />
+              </Form.Item>
+              <Form.Item label="ChatGPT 账号类型">
+                <ChatGPTCodexModeSwitch
+                  useCodex={useCodex}
+                  onChange={setUseCodex}
+                />
+              </Form.Item>
+            </>
           )}
         </Card>
 
