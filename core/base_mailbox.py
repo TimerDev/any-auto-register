@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """邮箱池基类 - 抽象临时邮箱/收件服务"""
 
 import json
@@ -329,6 +331,7 @@ def create_mailbox(
             domains=extra.get("cfworker_domains", ""),
             enabled_domains=extra.get("cfworker_enabled_domains", ""),
             subdomain=extra.get("cfworker_subdomain", ""),
+            domain_level_count=extra.get("email_domain_level_count", 2),
             random_subdomain=extra.get("cfworker_random_subdomain", False),
             random_name_subdomain=extra.get("cfworker_random_name_subdomain", False),
             fingerprint=extra.get("cfworker_fingerprint", ""),
@@ -724,7 +727,7 @@ class LaoudoMailbox(BaseMailbox):
     def wait_for_code(
         self,
         account: MailboxAccount,
-        keyword: str = "trae",
+        keyword: str = "",
         timeout: int = 120,
         before_ids: set = None,
         code_pattern: str = None,
@@ -804,7 +807,7 @@ class AitreMailbox(BaseMailbox):
     def wait_for_code(
         self,
         account: MailboxAccount,
-        keyword: str = "trae",
+        keyword: str = "",
         timeout: int = 120,
         before_ids: set = None,
         code_pattern: str = None,
@@ -2863,6 +2866,7 @@ class CFWorkerMailbox(BaseMailbox):
         domains: Any = None,
         enabled_domains: Any = None,
         subdomain: str = "",
+        domain_level_count: Any = 2,
         random_subdomain: Any = False,
         random_name_subdomain: Any = False,
         fingerprint: str = "",
@@ -2881,6 +2885,7 @@ class CFWorkerMailbox(BaseMailbox):
         else:
             self.enabled_domains = raw_enabled_domains
         self.subdomain = self._normalize_subdomain(subdomain)
+        self.domain_level_count = self._parse_domain_level_count(domain_level_count)
         self.random_subdomain = self._to_bool(random_subdomain)
         self.random_name_subdomain = self._to_bool(random_name_subdomain)
         self.fingerprint = fingerprint
@@ -2984,6 +2989,14 @@ class CFWorkerMailbox(BaseMailbox):
         text = str(value or "").strip().lower()
         return text in {"1", "true", "yes", "on"}
 
+    @staticmethod
+    def _parse_domain_level_count(value: Any) -> int:
+        try:
+            parsed = int(str(value or "").strip() or "2")
+        except (TypeError, ValueError):
+            return 2
+        return parsed if parsed >= 2 else 2
+
     @classmethod
     def _parse_domains(cls, value: Any) -> list[str]:
         if not value:
@@ -3052,6 +3065,13 @@ class CFWorkerMailbox(BaseMailbox):
             sub_parts.append(self._generate_subdomain_label())
         if self.subdomain:
             sub_parts.append(self.subdomain)
+
+        base_level_count = len([part for part in domain.split(".") if part])
+        expected_total_levels = max(self.domain_level_count, 2)
+        missing_levels = max(expected_total_levels - (base_level_count + len(sub_parts)), 0)
+        if missing_levels > 0:
+            fillers = [self._generate_subdomain_label() for _ in range(missing_levels)]
+            sub_parts = fillers + sub_parts
 
         if not sub_parts:
             return domain
@@ -3844,14 +3864,43 @@ class OutlookGraphMailboxBackend(OutlookMailboxBackend):
         )
         seen: set[str] = set()
         for folder in self.mailbox._graph_folder_names:
-            messages = self.mailbox._graph_list_messages(
-                access_token=access_token,
-                folder=folder,
-            )
-            for message in messages:
-                message_id = str(message.get("id") or "").strip()
-                if message_id:
-                    seen.add(f"{folder}:{message_id}")
+            try:
+                messages = self.mailbox._graph_list_messages(
+                    access_token=access_token,
+                    folder=folder,
+                )
+                for message in messages:
+                    message_id = str(message.get("id") or "").strip()
+                    if message_id:
+                        seen.add(f"{folder}:{message_id}")
+            except RuntimeError as exc:
+                if "HTTP 401" in str(exc):
+                    # 401 → token 失效，强制刷新后重试一次
+                    self.mailbox._log(
+                        f"[微软邮箱][Graph] get_current_ids folder={folder} 遇到 401，强制刷新 token"
+                    )
+                    _cache = (account.extra or {}).get("_oauth_token_cache")
+                    if isinstance(_cache, dict):
+                        _cache.pop(
+                            self.mailbox._normalize_backend_name(self.backend_name), None
+                        )
+                    access_token = self.mailbox._get_oauth_access_token(
+                        account,
+                        preferred_backend=self.backend_name,
+                    )
+                    try:
+                        messages = self.mailbox._graph_list_messages(
+                            access_token=access_token,
+                            folder=folder,
+                        )
+                        for message in messages:
+                            message_id = str(message.get("id") or "").strip()
+                            if message_id:
+                                seen.add(f"{folder}:{message_id}")
+                    except Exception:
+                        pass
+                else:
+                    raise
         return seen
 
     def wait_for_code(
@@ -3871,7 +3920,23 @@ class OutlookGraphMailboxBackend(OutlookMailboxBackend):
         }
         keyword_lower = str(keyword or "").strip().lower()
 
+        # 标记是否已做过一次 401 强制刷 token，避免无限循环
+        _token_refreshed = False
+
+        def _force_refresh_token() -> str:
+            """清除 OAuth 缓存，强制重新获取 access token。"""
+            _cache = (account.extra or {}).get("_oauth_token_cache")
+            if isinstance(_cache, dict):
+                _cache.pop(
+                    self.mailbox._normalize_backend_name(self.backend_name), None
+                )
+            return self.mailbox._get_oauth_access_token(
+                account,
+                preferred_backend=self.backend_name,
+            )
+
         def poll_once() -> Optional[str]:
+            nonlocal _token_refreshed
             access_token = self.mailbox._get_oauth_access_token(
                 account,
                 preferred_backend=self.backend_name,
@@ -3930,6 +3995,52 @@ class OutlookGraphMailboxBackend(OutlookMailboxBackend):
                         )
                         return code
                 except Exception as exc:
+                    exc_str = str(exc)
+                    # 401 → token 失效，强制刷新后重试一次
+                    if "HTTP 401" in exc_str and not _token_refreshed:
+                        _token_refreshed = True
+                        self.mailbox._log(
+                            f"[微软邮箱][Graph] folder={folder} 遇到 401，强制刷新 token 后重试"
+                        )
+                        try:
+                            access_token = _force_refresh_token()
+                            messages = self.mailbox._graph_list_messages(
+                                access_token=access_token,
+                                folder=folder,
+                            )
+                            new_messages = []
+                            for message in messages:
+                                message_id = str(message.get("id") or "").strip()
+                                seen_key = f"{folder}:{message_id}"
+                                if not message_id or seen_key in seen:
+                                    continue
+                                seen.add(seen_key)
+                                new_messages.append(message)
+                            for message in new_messages:
+                                subject = str(message.get("subject") or "").strip()
+                                text = self.mailbox._graph_message_text(message)
+                                if keyword_lower and keyword_lower not in text.lower():
+                                    continue
+                                code = self.mailbox._safe_extract(text, code_pattern)
+                                if not code:
+                                    mid = str(message.get("id") or "").strip()
+                                    if mid:
+                                        detail = self.mailbox._graph_get_message(
+                                            access_token=access_token,
+                                            message_id=mid,
+                                        )
+                                        text = self.mailbox._graph_message_text(detail)
+                                        code = self.mailbox._safe_extract(text, code_pattern)
+                                if code and code not in exclude_codes:
+                                    self.mailbox._log(
+                                        f"[微软邮箱][Graph] folder={folder} 刷新 token 后验证码提取成功: {code}"
+                                    )
+                                    return code
+                        except Exception as retry_exc:
+                            self.mailbox._log(
+                                f"[微软邮箱][Graph] folder={folder} 刷新 token 后仍然失败: {retry_exc}"
+                            )
+                        continue
                     self.mailbox._log(
                         f"[微软邮箱][Graph] folder={folder} 查询异常: {exc}"
                     )
@@ -3943,8 +4054,94 @@ class OutlookGraphMailboxBackend(OutlookMailboxBackend):
         )
 
 
+class MailApiUrlOtpBackend(OutlookMailboxBackend):
+    backend_name = "mailapi_url"
+
+    @staticmethod
+    def _code_key(code: str) -> str:
+        return f"mailapi_code:{str(code or '').strip()}"
+
+    def _fetch_mailapi_text(self, account: MailboxAccount) -> str:
+        import requests
+
+        extra = account.extra or {}
+        url = str(extra.get("mailapi_url") or "").strip()
+        if not url:
+            raise RuntimeError("mailapi_url 为空，无法轮询取码")
+        response = requests.get(
+            url,
+            timeout=15,
+            proxies=getattr(self.mailbox, "_proxy", None),
+        )
+        if response.status_code >= 400:
+            raise RuntimeError(
+                f"MailAPI 取码请求失败: HTTP {response.status_code}"
+            )
+        return str(response.text or "")
+
+    def _extract_code(self, text: str, code_pattern: str | None) -> str:
+        normalized_text = self.mailbox._decode_raw_content(text) or str(text or "")
+        return str(self.mailbox._safe_extract(normalized_text, code_pattern) or "").strip()
+
+    def get_current_ids(self, account: MailboxAccount) -> set:
+        try:
+            text = self._fetch_mailapi_text(account)
+            code = self._extract_code(text, None)
+            return {self._code_key(code)} if code else set()
+        except Exception:
+            return set()
+
+    def wait_for_code(
+        self,
+        account: MailboxAccount,
+        keyword: str = "",
+        timeout: int = 120,
+        before_ids: set | None = None,
+        code_pattern: str | None = None,
+        **kwargs,
+    ) -> str:
+        seen = {str(mid) for mid in (before_ids or set())}
+        exclude_codes = {
+            str(code).strip()
+            for code in (kwargs.get("exclude_codes") or set())
+            if str(code or "").strip()
+        }
+        keyword_lower = str(keyword or "").strip().lower()
+
+        def poll_once() -> Optional[str]:
+            try:
+                text = self._fetch_mailapi_text(account)
+            except Exception as exc:
+                self.mailbox._log(f"[MailAPI] 拉取失败: {exc}")
+                return None
+
+            if keyword_lower and keyword_lower not in str(text).lower():
+                return None
+            code = self._extract_code(text, code_pattern)
+            if not code:
+                return None
+            if code in exclude_codes:
+                self.mailbox._log(f"[MailAPI] 跳过已尝试验证码: {code}")
+                return None
+            code_key = self._code_key(code)
+            if code_key in seen:
+                return None
+            seen.add(code_key)
+            self.mailbox._log(f"[MailAPI] 收到验证码: {code}")
+            return code
+
+        return self.mailbox._run_polling_wait(
+            timeout=timeout,
+            poll_interval=3,
+            poll_once=poll_once,
+        )
+
+
 class OutlookMailbox(BaseMailbox):
     """微软邮箱（Outlook / Hotmail）本地账号池（Graph / IMAP 策略）"""
+
+    # 类级别锁：保证多线程并发时取号互斥，防止多个实例取到同一个邮箱
+    _pop_lock = threading.Lock()
 
     def __init__(
         self,
@@ -3991,6 +4188,7 @@ class OutlookMailbox(BaseMailbox):
         self._backends: dict[str, OutlookMailboxBackend] = {
             "imap": OutlookImapMailboxBackend(self),
             "graph": OutlookGraphMailboxBackend(self),
+            "mailapi_url": MailApiUrlOtpBackend(self),
         }
 
     @staticmethod
@@ -3998,12 +4196,26 @@ class OutlookMailbox(BaseMailbox):
         backend = str(value or "graph").strip().lower() or "graph"
         return backend if backend in {"graph", "imap"} else "graph"
 
+    @staticmethod
+    def _normalize_account_type(value: Any) -> str:
+        account_type = str(value or "").strip().lower()
+        if account_type in {"mailapi_url", "microsoft_oauth"}:
+            return account_type
+        return "microsoft_oauth"
+
+    def _is_mailapi_account(self, account: MailboxAccount) -> bool:
+        extra = getattr(account, "extra", None) or {}
+        account_type = self._normalize_account_type(extra.get("account_type"))
+        if account_type == "mailapi_url":
+            return True
+        return bool(str(extra.get("mailapi_url") or "").strip())
+
     def _pop_account(self) -> dict:
         from sqlmodel import Session, select
 
         from core.db import OutlookAccountModel, engine
 
-        with self._lock:
+        with OutlookMailbox._pop_lock:
             with Session(engine) as session:
                 account = (
                     session.exec(
@@ -4022,6 +4234,8 @@ class OutlookMailbox(BaseMailbox):
                     "password": account.password,
                     "client_id": account.client_id,
                     "refresh_token": account.refresh_token,
+                    "account_type": getattr(account, "account_type", "microsoft_oauth"),
+                    "mailapi_url": getattr(account, "mailapi_url", ""),
                 }
                 session.delete(account)
                 session.commit()
@@ -4035,13 +4249,21 @@ class OutlookMailbox(BaseMailbox):
         password = str(payload.get("password") or "")
         client_id = str(payload.get("client_id") or "")
         refresh_token = str(payload.get("refresh_token") or "")
-        auth_mode = "oauth" if client_id and refresh_token else "password"
+        account_type = self._normalize_account_type(payload.get("account_type"))
+        mailapi_url = str(payload.get("mailapi_url") or "").strip()
+        auth_mode = (
+            "mailapi_url"
+            if account_type == "mailapi_url"
+            else ("oauth" if client_id and refresh_token else "password")
+        )
         self._log(f"[微软邮箱] 取出账号: {email}（已从本地池移除）")
         self._log(
             "[微软邮箱] 账号认证信息: "
             f"has_password={bool(password)} "
             f"has_client_id={bool(client_id)} "
             f"has_refresh_token={bool(refresh_token)} "
+            f"has_mailapi_url={bool(mailapi_url)} "
+            f"account_type={account_type} "
             f"auth_mode={auth_mode}"
         )
         return MailboxAccount(
@@ -4052,6 +4274,8 @@ class OutlookMailbox(BaseMailbox):
                 "password": password,
                 "client_id": client_id,
                 "refresh_token": refresh_token,
+                "account_type": account_type,
+                "mailapi_url": mailapi_url,
                 "outlook_backend": self._backend_name,
             },
         )
@@ -4068,6 +4292,8 @@ class OutlookMailbox(BaseMailbox):
         password = str(extra.get("password") or "")
         client_id = str(extra.get("client_id") or "")
         refresh_token = str(extra.get("refresh_token") or "")
+        account_type = self._normalize_account_type(extra.get("account_type"))
+        mailapi_url = str(extra.get("mailapi_url") or "")
 
         with self._lock:
             with Session(engine) as session:
@@ -4075,6 +4301,11 @@ class OutlookMailbox(BaseMailbox):
                     select(OutlookAccountModel).where(OutlookAccountModel.email == email)
                 ).first()
                 if existing:
+                    existing.password = password
+                    existing.client_id = client_id
+                    existing.refresh_token = refresh_token
+                    existing.account_type = account_type
+                    existing.mailapi_url = mailapi_url
                     existing.enabled = True
                     existing.updated_at = _utcnow()
                     session.add(existing)
@@ -4085,6 +4316,8 @@ class OutlookMailbox(BaseMailbox):
                             password=password,
                             client_id=client_id,
                             refresh_token=refresh_token,
+                            account_type=account_type,
+                            mailapi_url=mailapi_url,
                             enabled=True,
                             created_at=_utcnow(),
                             updated_at=_utcnow(),
@@ -4150,7 +4383,7 @@ class OutlookMailbox(BaseMailbox):
             candidates.append(key)
         return candidates
 
-    def _fetch_oauth_token_bundle(
+    def probe_oauth_availability(
         self,
         *,
         email: str,
@@ -4162,9 +4395,15 @@ class OutlookMailbox(BaseMailbox):
             self._log(
                 f"[微软邮箱] OAuth token 跳过: email={email} has_client_id={bool(client_id)} has_refresh_token={bool(refresh_token)}"
             )
-            return {}
+            return {
+                "ok": False,
+                "reason": "missing_oauth_credentials",
+                "message": "缺少 client_id 或 refresh_token，无法通过微软邮箱可用性检测",
+            }
+
         import requests
 
+        last_error = ""
         for endpoint in self._token_endpoints():
             endpoint = str(endpoint or "").strip()
             if not endpoint:
@@ -4192,11 +4431,31 @@ class OutlookMailbox(BaseMailbox):
                         "[微软邮箱] OAuth token 响应: "
                         f"email={email} endpoint={endpoint} scope_label={scope_label} status={resp.status_code}"
                     )
-                    if resp.status_code >= 400:
-                        self._log(
-                            f"[微软邮箱] OAuth token 失败响应: {resp.text[:200]}"
-                        )
-                        continue
+                except Exception as exc:
+                    last_error = str(exc)
+                    self._log(
+                        "[微软邮箱] OAuth token 请求异常: "
+                        f"email={email} endpoint={endpoint} scope_label={scope_label} error={exc}"
+                    )
+                    continue
+
+                body_text = str(resp.text or "")[:500]
+                if resp.status_code >= 400:
+                    self._log(f"[微软邮箱] OAuth token 失败响应: {body_text[:200]}")
+                    lowered = body_text.lower()
+                    if "invalid_grant" in lowered and "service abuse mode" in lowered:
+                        return {
+                            "ok": False,
+                            "reason": "service_abuse_mode",
+                            "message": "微软邮箱可用性检测未通过，账号处于 service abuse mode",
+                            "status_code": resp.status_code,
+                            "endpoint": endpoint,
+                            "scope_label": scope_label,
+                        }
+                    last_error = body_text or f"HTTP {resp.status_code}"
+                    continue
+
+                try:
                     data = resp.json() if resp.content else {}
                     access_token = str(data.get("access_token") or "").strip()
                     if access_token:
@@ -4209,22 +4468,56 @@ class OutlookMailbox(BaseMailbox):
                             f"[微软邮箱] OAuth access token 获取成功: {email} (scope_label={scope_label})"
                         )
                         return {
+                            "ok": True,
+                            "reason": "ok",
+                            "message": "微软邮箱可用性检测通过",
                             "access_token": access_token,
                             "scope_label": scope_label,
-                            "expires_in": expires_in_value,
                             "endpoint": endpoint,
+                            "expires_in": expires_in_value,
                         }
+
                     self._log(
                         f"[微软邮箱] OAuth token 响应未包含 access_token: keys={sorted(list(data.keys()))[:10]}"
                     )
+                    last_error = body_text or "OAuth 响应未包含 access_token"
                 except Exception as exc:
+                    last_error = body_text or str(exc) or "OAuth 响应解析失败"
                     self._log(
-                        "[微软邮箱] OAuth token 请求异常: "
+                        "[微软邮箱] OAuth token 响应解析异常: "
                         f"email={email} endpoint={endpoint} scope_label={scope_label} error={exc}"
                     )
                     continue
+
+        return {
+            "ok": False,
+            "reason": "oauth_token_failed",
+            "message": f"微软邮箱可用性检测未通过: {last_error or 'OAuth token 获取失败'}",
+        }
+
+    def _fetch_oauth_token_bundle(
+        self,
+        *,
+        email: str,
+        client_id: str,
+        refresh_token: str,
+        preferred_backend: str | None = None,
+    ) -> dict[str, Any]:
+        probe = self.probe_oauth_availability(
+            email=email,
+            client_id=client_id,
+            refresh_token=refresh_token,
+            preferred_backend=preferred_backend,
+        )
+        if probe.get("ok"):
+            return {
+                "access_token": str(probe.get("access_token") or ""),
+                "scope_label": probe.get("scope_label", ""),
+                "expires_in": probe.get("expires_in", 0),
+                "endpoint": probe.get("endpoint", ""),
+            }
         self._log(f"[微软邮箱] OAuth token 获取失败，回退密码登录: {email}")
-        return {}
+        return {"reason": str(probe.get("reason") or "")}
 
     def _fetch_oauth_token(
         self,
@@ -4273,7 +4566,9 @@ class OutlookMailbox(BaseMailbox):
         )
         access_token = str(bundle.get("access_token") or "").strip()
         if not access_token:
-            raise RuntimeError("微软邮箱 OAuth access token 获取失败")
+            reason = bundle.get("reason", "")
+            suffix = f" [{reason}]" if reason else ""
+            raise RuntimeError(f"微软邮箱 OAuth access token 获取失败{suffix}")
 
         expires_in = bundle.get("expires_in")
         try:
@@ -4341,6 +4636,8 @@ class OutlookMailbox(BaseMailbox):
 
     def _resolve_backend(self, account: MailboxAccount) -> OutlookMailboxBackend:
         extra = account.extra or {}
+        if self._is_mailapi_account(account):
+            return self._backends["mailapi_url"]
         override = self._normalize_backend_name(
             extra.get("outlook_backend") or self._backend_name
         )

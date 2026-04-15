@@ -104,12 +104,28 @@ class BaseChatGPTRegistrationModeAdapter(ABC):
             extra_config=processed_config,
         )
 
-        engine = self._create_engine(processed_context)
-        if processed_context.email is not None:
-            engine.email = processed_context.email
-        if processed_context.password is not None:
-            engine.password = processed_context.password
-        return engine.run()
+        _MAILBOX_ERROR_MARKERS = ("service_abuse_mode", "oauth_token_failed")
+        _MAX_ATTEMPTS = 3
+        result = None
+        for _attempt in range(_MAX_ATTEMPTS):
+            engine = self._create_engine(processed_context)
+            if processed_context.email is not None:
+                engine.email = processed_context.email
+            if processed_context.password is not None:
+                engine.password = processed_context.password
+            result = engine.run()
+            if result.success:
+                return result
+            err = str(getattr(result, "error_message", "") or "")
+            matched_marker = next((m for m in _MAILBOX_ERROR_MARKERS if m in err), None)
+            if matched_marker and _attempt < _MAX_ATTEMPTS - 1:
+                processed_context.callback_logger(
+                    f"邮箱 OAuth token 已失效（{matched_marker}），"
+                    f"换用下一个邮箱重试 ({_attempt + 1}/{_MAX_ATTEMPTS - 1})..."
+                )
+                continue
+            break
+        return result
 
     def build_account(self, result, fallback_password: str) -> Account:
         return Account(

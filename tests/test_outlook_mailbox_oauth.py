@@ -5,13 +5,16 @@ from core.base_mailbox import MailboxAccount, OutlookMailbox, create_mailbox
 
 
 class _FakeResponse:
-    def __init__(self, status_code, payload=None, text=""):
+    def __init__(self, status_code, payload=None, text="", json_error=None):
         self.status_code = status_code
         self._payload = payload or {}
         self.text = text or ""
-        self.content = b"{}" if payload is not None else b""
+        self.content = b"{}" if payload is not None or json_error is not None else b""
+        self._json_error = json_error
 
     def json(self):
+        if self._json_error is not None:
+            raise self._json_error
         return dict(self._payload)
 
 
@@ -86,6 +89,43 @@ class OutlookMailboxOAuthTests(unittest.TestCase):
         )
 
     @mock.patch("requests.post")
+    def test_probe_oauth_availability_detects_service_abuse_mode(self, mock_post):
+        mailbox = OutlookMailbox(token_endpoint="https://token.example.test")
+        mock_post.return_value = _FakeResponse(
+            400,
+            text='{"error":"invalid_grant","error_description":"User account is found to be in service abuse mode."}',
+        )
+
+        result = mailbox.probe_oauth_availability(
+            email="demo@hotmail.com",
+            client_id="client-id",
+            refresh_token="refresh-token",
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "service_abuse_mode")
+        self.assertIn("service abuse mode", result["message"])
+
+    @mock.patch("requests.post")
+    def test_probe_oauth_availability_returns_ok_when_access_token_is_obtained(self, mock_post):
+        mailbox = OutlookMailbox(token_endpoint="https://token.example.test")
+        mock_post.return_value = _FakeResponse(
+            200,
+            payload={"access_token": "ok-token", "expires_in": 3600},
+            text='{"access_token":"ok-token","expires_in":3600}',
+        )
+
+        result = mailbox.probe_oauth_availability(
+            email="demo@outlook.com",
+            client_id="client-id",
+            refresh_token="refresh-token",
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["reason"], "ok")
+        self.assertEqual(result["access_token"], "ok-token")
+
+    @mock.patch("requests.post")
     @mock.patch("requests.request")
     def test_wait_for_code_uses_graph_backend_by_default(self, mock_request, mock_post):
         mailbox = OutlookMailbox(token_endpoint="https://token.example.test")
@@ -120,6 +160,34 @@ class OutlookMailboxOAuthTests(unittest.TestCase):
         self.assertIn(
             "/me/mailFolders/inbox/messages",
             str(mock_request.call_args.args[1]),
+        )
+
+    @mock.patch("requests.get")
+    def test_wait_for_code_uses_mailapi_backend_for_mailapi_account(self, mock_get):
+        mailbox = OutlookMailbox()
+        account = MailboxAccount(
+            email="demo@outlook.com",
+            extra={
+                "account_type": "mailapi_url",
+                "mailapi_url": "https://mailapi.icu/key?type=html&orderNo=abc123",
+            },
+        )
+        mock_get.return_value = _FakeResponse(
+            200,
+            text="<html><body>Your OpenAI verification code is 246810</body></html>",
+        )
+
+        code = mailbox.wait_for_code(
+            account,
+            timeout=5,
+            before_ids=set(),
+        )
+
+        self.assertEqual(code, "246810")
+        self.assertTrue(mock_get.call_count >= 1)
+        self.assertEqual(
+            mock_get.call_args.kwargs.get("timeout"),
+            15,
         )
 
     @mock.patch("requests.post")
@@ -162,12 +230,20 @@ class OutlookMailboxOAuthTests(unittest.TestCase):
         self.assertTrue(any("/me/mailFolders/deleteditems/messages" in url for url in requested_urls))
 
     @mock.patch("requests.post")
-    def test_fetch_oauth_token_returns_empty_when_all_scope_attempts_fail(self, mock_post):
+    def test_fetch_oauth_token_returns_empty_when_probe_gets_malformed_json_on_2xx(self, mock_post):
         mailbox = OutlookMailbox(token_endpoint="https://token.example.test")
-        mock_post.return_value = _FakeResponse(
-            400,
-            text='{"error":"invalid_grant"}',
-        )
+        mock_post.side_effect = [
+            _FakeResponse(
+                200,
+                text="not-json",
+                json_error=ValueError("malformed json"),
+            ),
+            _FakeResponse(
+                200,
+                text="still-not-json",
+                json_error=ValueError("malformed json again"),
+            ),
+        ]
 
         token = mailbox._fetch_oauth_token(
             email="demo@outlook.com",
